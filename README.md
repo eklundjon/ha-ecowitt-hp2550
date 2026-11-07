@@ -73,9 +73,15 @@ One `light` entity for the backlight:
 - Round-trip latency is a few seconds - the console polls the mailbox, it isn't
   pushed, so a command takes a poll cycle to land and report back.
 
-The integration is the sole writer of the console's Station ID and second upload
-path (the two mailbox fields). If you also point the console at a real
-custom-server upload, that will collide - pick one.
+The backlight patch writes the console's Station ID and second upload path (the
+mailbox), and doing so **breaks the console's custom-server data upload** -
+confirmed on hardware. So this is incompatible with pushing the console's own
+weather data to Home Assistant through its custom server (the standard `ecowitt`
+integration or ecowitt2mqtt): the first backlight command leaves that upload
+POSTing to an empty path. Use this only if your weather data reaches HA another
+way (e.g. a separate GW-series gateway) or not from the console at all. The
+[patch repo](https://github.com/eklundjon/ecowitt-hp2550-backlight) has the
+mechanism and a planned fix.
 
 ## Supported devices
 
