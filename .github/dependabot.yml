@@ -1,0 +1,23 @@
+version: 2
+
+# Dependency update PRs. Security *alerts* work off the dependency graph and
+# don't need this file; this is only about routine version bumps.
+updates:
+  # GitHub Actions used by the workflows in .github/workflows/.
+  # hacs/action@main and home-assistant/actions/hassfest@master deliberately
+  # track moving branches per their vendors' documented usage; this keeps the
+  # pinned ones (actions/checkout, actions/setup-python) current.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # A pip ecosystem block goes here once a test suite and its requirements files
+  # exist (ruff + PHACC pins, as in the other repos). No Python deps to track
+  # yet — the integration pulls nothing beyond Home Assistant itself.

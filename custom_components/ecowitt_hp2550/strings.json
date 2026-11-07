@@ -1,0 +1,18 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "description": "Enter the console's IP address or hostname. The backlight-over-IP patch must already be flashed to the console.",
+        "data": {
+          "host": "Host"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach the console on port 45000."
+    },
+    "abort": {
+      "already_configured": "This console is already configured."
+    }
+  }
+}
