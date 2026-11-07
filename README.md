@@ -22,7 +22,8 @@ Weather or Ecowitt.
 - An HP2550 console (or a rebrand of it - see Supported devices) running the
   **backlight-over-IP firmware patch**. Without the patch the integration still
   connects and adds the entity, but the backlight won't respond to it. The patch
-  and its build tooling are published separately (repo forthcoming).
+  and its build tooling are in
+  [ecowitt-hp2550-backlight](https://github.com/eklundjon/ecowitt-hp2550-backlight).
 - Home Assistant 2025.4 or newer.
 - The console reachable on the LAN. The port-45000 API is served by the
   console's ESP WiFi module, so the console has to be associated to WiFi for any
