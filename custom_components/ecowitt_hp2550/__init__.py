@@ -8,7 +8,7 @@ from homeassistant.core import HomeAssistant
 
 from .coordinator import Hp2550Coordinator
 
-PLATFORMS = [Platform.LIGHT]
+PLATFORMS = [Platform.LIGHT, Platform.SWITCH]
 
 type Hp2550ConfigEntry = ConfigEntry[Hp2550Coordinator]
 
