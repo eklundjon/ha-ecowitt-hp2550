@@ -1,0 +1,18 @@
+# Test dependencies for the Ecowitt HP2550 integration.
+#
+# PHACC pins the exact Home Assistant version it was built against. CI pins a
+# specific PHACC (and thus HA) per matrix job: the 2025.4 floor in
+# .github/workflows/test.yml, and the latest in requirements_ha_latest.txt. This
+# file leaves it unpinned, which locally pulls the latest. Recent PHACC releases
+# need Python 3.14.
+#
+#     python -m venv .venv-test
+#     .venv-test/bin/pip install -r requirements_test.txt
+#     .venv-test/bin/python -m pytest
+pytest
+pytest-asyncio
+pytest-cov
+pytest-homeassistant-custom-component
+
+# Linter, pinned so local and CI agree. CI's lint job reads this pin.
+ruff==0.15.20
