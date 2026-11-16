@@ -15,4 +15,4 @@ pytest-cov
 pytest-homeassistant-custom-component
 
 # Linter, pinned so local and CI agree. CI's lint job reads this pin.
-ruff==0.15.20
+ruff==0.17.5
