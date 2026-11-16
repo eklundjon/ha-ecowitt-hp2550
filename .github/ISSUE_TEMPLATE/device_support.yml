@@ -1,0 +1,83 @@
+name: Device support report
+description: How the integration works (or doesn't) with a console model or firmware that isn't in the README's support table.
+labels: ["device support"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying it. A report is useful whether everything works or not: it's how an inferred model becomes a verified one.
+
+        Note that the backlight patch is pinned to one stock firmware build. A console on a different firmware version needs the patch re-ported first, even if the hardware matches.
+  - type: input
+    id: model
+    attributes:
+      label: Console model and brand
+      placeholder: Ecowitt HP2560
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Console firmware
+      placeholder: V2.0.4
+    validations:
+      required: true
+  - type: dropdown
+    id: patch
+    attributes:
+      label: Backlight patch version
+      options:
+        - v2
+        - v1
+        - not sure
+    validations:
+      required: true
+  - type: checkboxes
+    id: works
+    attributes:
+      label: What works
+      options:
+        - label: Light on/off
+        - label: Brightness
+        - label: Auto brightness switch
+        - label: Backlight schedule switch
+        - label: Dark mode switch
+        - label: Home Assistant follows changes made on the console's keypad
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything that didn't work, or behaved differently
+    validations:
+      required: false
+  - type: input
+    id: integration_version
+    attributes:
+      label: Integration version
+      placeholder: 0.2.0
+    validations:
+      required: true
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      placeholder: 2026.11.0
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: On the console's device page, ⋮ → Download diagnostics, then drag the file here.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Debug log (optional)
+      description: |
+        ```yaml
+        logger:
+          logs:
+            custom_components.ecowitt_hp2550: debug
+        ```
+      render: shell

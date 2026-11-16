@@ -1,0 +1,78 @@
+name: Bug report
+description: Something doesn't work on a console this integration supports.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a console model or firmware that isn't in the README's support table, use the **Device support report** form instead.
+
+        Please attach a diagnostics download: it's the fastest way to sort out most problems. It includes the raw mailbox slots and the parsed status, but not the console's address or MAC.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead. If the console's panel did something different from what Home Assistant shows, say what the panel did.
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Console model and brand
+      placeholder: Ambient Weather HP2550 (WS-5000)
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Console firmware
+      description: The stock firmware version the patch was built on.
+      placeholder: V2.0.4
+    validations:
+      required: true
+  - type: dropdown
+    id: patch
+    attributes:
+      label: Backlight patch version
+      options:
+        - v2
+        - v1
+        - not sure
+    validations:
+      required: true
+  - type: input
+    id: integration_version
+    attributes:
+      label: Integration version
+      description: In HACS, or in the integration's manifest.json.
+      placeholder: 0.2.0
+    validations:
+      required: true
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      description: Settings → About.
+      placeholder: 2026.11.0
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: On the console's device page, ⋮ → Download diagnostics, then drag the file here.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Debug log (optional)
+      description: |
+        Turn on debug logging with this in configuration.yaml, reproduce the problem, and paste the relevant lines from home-assistant.log:
+
+        ```yaml
+        logger:
+          logs:
+            custom_components.ecowitt_hp2550: debug
+        ```
+      render: shell
