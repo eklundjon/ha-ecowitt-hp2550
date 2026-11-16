@@ -18,6 +18,23 @@ updates:
       actions:
         patterns: ["*"]
 
-  # A pip ecosystem block goes here once a test suite and its requirements files
-  # exist (ruff + PHACC pins, as in the other repos). No Python deps to track
-  # yet — the integration pulls nothing beyond Home Assistant itself.
+  # Python test dependencies: requirements_test.txt and requirements_ha_latest.txt.
+  # In practice this bumps two pins: ruff (read by the lint job straight out of
+  # requirements_test.txt) and PHACC in requirements_ha_latest.txt, which moves
+  # CI's "HA latest" job to each new Home Assistant release. PHACC gets its own
+  # group so a Home Assistant bump that breaks something doesn't hold up ruff.
+  #
+  # Dependabot resolves with the Python in .python-version. Keep that file at the
+  # "HA latest" job's Python in test.yml.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+    groups:
+      home-assistant:
+        patterns: ["pytest-homeassistant-custom-component"]
+      python:
+        patterns: ["*"]

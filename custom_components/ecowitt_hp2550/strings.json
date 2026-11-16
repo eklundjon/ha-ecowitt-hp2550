@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "description": "Enter the console's IP address or hostname. The backlight-over-IP patch must already be flashed to the console.",
+        "description": "Enter the console's IP address or hostname. The backlight-over-IP patch (v1 or v2) must already be flashed to the console.",
         "data": {
           "host": "Host"
         }
@@ -13,6 +13,19 @@
     },
     "abort": {
       "already_configured": "This console is already configured."
+    }
+  },
+  "entity": {
+    "switch": {
+      "auto_brightness": {
+        "name": "Auto brightness"
+      },
+      "backlight_schedule": {
+        "name": "Backlight schedule"
+      },
+      "display_mode": {
+        "name": "Dark mode"
+      }
     }
   }
 }

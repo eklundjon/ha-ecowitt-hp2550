@@ -2,7 +2,12 @@
 
 DOMAIN = "ecowitt_hp2550"
 
-# The status slot only changes when the console acts on a command, and the
-# console's own schedule / auto-brightness change the backlight without touching
-# it, so polling is mainly to recover state after a restart. Keep it gentle.
+# On v2 the status is authoritative and follows keypad changes; on v1 it only
+# reports the last command, so polling mostly recovers state after a restart.
+# Each read is a connection to the console's WiFi module, so keep it gentle.
 UPDATE_INTERVAL = 30
+
+# Level to restore when the auto-brightness switch is turned off before the
+# integration has seen a numeric level (e.g. auto was already on at startup).
+# The status shows "A" instead of the saved level while auto is on.
+DEFAULT_LEVEL = 50
