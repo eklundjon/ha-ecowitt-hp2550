@@ -114,9 +114,15 @@ Behaviours worth knowing:
   one shows the light as unknown. Commands still work and are sent as v1.
 - The state is read from the console, so it's authoritative: no `assumed_state`.
 - Each command is confirmed before the next one goes out: the integration waits
-  up to 15 s for the console to echo the command's sequence number, and resends
-  once if it doesn't. A command that never gets confirmed raises an error in HA.
-- Round-trip latency is a few seconds - the console polls the mailbox, it isn't
+  for the console to echo the command's sequence number, retrying failed reads
+  and rewriting the command (at most 3 writes) if it didn't land. A command that
+  isn't confirmed within 20 s raises an error in HA that names what failed.
+  - This means a service call can take up to 20 s, or 40 s for `light.turn_on`
+    with a brightness on a dark panel (two commands). Automations that call these
+    back to back wait for each one.
+  - A command that needed a retry still succeeds, but logs one warning saying
+    what went wrong first.
+- Round-trip latency is usually 5-10 s - the console polls the mailbox, it isn't
   pushed.
 
 On v1 firmware you get the light only, as before: on/off and brightness (0-100
@@ -129,7 +135,8 @@ protocol notes in the patch repo):
 
 - While someone is on the **Customized server** screen the patch stands down, and
   leaving it (or its ~1-1.5 min timeout) loses any command sent during the visit.
-  The resend usually covers this.
+  The integration rewrites the command if the visit ends within its 20 s window;
+  otherwise the command fails and you'll need to send it again.
 - The **backlight menu** writes its settings back when you leave it, undoing
   backlight, power and schedule changes sent while it was open.
 - Values set over IP live in the console's RAM. They normally don't survive a
@@ -139,6 +146,10 @@ protocol notes in the patch repo):
   interval.
 - The keypad's 0-10 brightness is the level / 10, so levels between steps are
   real and visibly distinct.
+- The console's **WiFi module** answers one client at a time and takes at most
+  five connections. Another port-45000 client that holds connections open (e.g.
+  a script that connects once and reuses the connection) can make the
+  integration's exchanges fail, which shows up as warnings and slower commands.
 
 The **v1** patch writes the console's Station ID and second upload path (the
 mailbox), and doing so **breaks the console's custom-server data upload** -
