@@ -312,10 +312,21 @@ def command_string(verb: str, value: int | str, seq: int, generation: int = GEN_
 
 
 def _summary(failures: list[str]) -> str:
-    """A suffix listing failed exchanges, or nothing if there were none."""
+    """A suffix listing failed exchanges, or nothing if there were none.
+
+    A run of identical failures (e.g. every retry of the first read timing out
+    on connect) is listed once, with a count.
+    """
     if not failures:
         return ""
-    return f"; {len(failures)} failed exchange(s): " + "; ".join(failures)
+    runs: list[list] = []
+    for entry in failures:
+        if runs and runs[-1][0] == entry:
+            runs[-1][1] += 1
+        else:
+            runs.append([entry, 1])
+    listed = (entry if n == 1 else f"{entry} ({n} times)" for entry, n in runs)
+    return f"; {len(failures)} failed exchange(s): " + "; ".join(listed)
 
 
 def redactable_id(text: str) -> bool:
