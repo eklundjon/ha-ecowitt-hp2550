@@ -410,7 +410,26 @@ async def test_console_that_never_answers_still_raises():
     with pytest.raises(Hp2550Error, match="record never read") as err:
         await c.send_command("BP", 0, GEN_V2, timeout=0.05, poll=0.001)
     assert "TimeoutError" in str(err.value)
+    assert str(err.value).count("first record read") == 1
     assert c.writes == [] and c.pending_seq is None
+
+
+def test_summary_collapses_runs_of_identical_failures():
+    from custom_components.ecowitt_hp2550.protocol import _summary
+
+    assert _summary([]) == ""
+    assert _summary(["a: x", "a: x", "a: x", "b: y", "a: x"]) == (
+        "; 5 failed exchange(s): a: x (3 times); b: y; a: x")
+
+
+async def test_repeated_first_read_failures_are_listed_once(caplog):
+    c = FakeConsole(V2_RECORD, faults=[(R, False)] * 3)
+    await c.send_command("BP", 0, GEN_V2, timeout=1, poll=0.001)
+    confirmed = [r.getMessage() for r in caplog.records if "confirmed after" in r.getMessage()]
+    assert len(confirmed) == 1
+    assert "3 failed exchange(s)" in confirmed[0]
+    assert confirmed[0].count("first record read") == 1
+    assert "(3 times)" in confirmed[0]
 
 
 async def test_every_write_lost_raises_with_each_attempt_named():
