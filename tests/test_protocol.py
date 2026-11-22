@@ -193,9 +193,15 @@ def test_custom_record_round_trip():
 class FakeConsole(Hp2550Client):
     """A client whose transport is an in-memory console record."""
 
-    def __init__(self, record, path2="", ack_after=0, drop_writes=0, reject=False):
+    def __init__(self, record, path2="", ack_after=0, drop_writes=0, reject=False,
+                 faults=None):
         super().__init__("test")
         self.reject = reject
+        # Scripted transport faults: a list of (cmd, landed) consumed in order
+        # as those commands are sent. Each raises a timeout-style Hp2550Error;
+        # landed=True means a write took effect before its reply was lost.
+        self.faults = list(faults or [])
+        self.exchanges: list[int] = []
         self.record = dict(record)
         self.path2 = path2
         self.ack_after = ack_after  # status reads before the echo appears
@@ -205,6 +211,12 @@ class FakeConsole(Hp2550Client):
         self._acted: str | None = None
 
     async def _transact(self, cmd, data=b""):
+        self.exchanges.append(cmd)
+        if self.faults and self.faults[0][0] == cmd:
+            _, landed = self.faults.pop(0)
+            if landed and cmd == p.CMD_WRITE_CUSTOMIZED:
+                await self._apply(data)
+            raise Hp2550Error(f"0x{cmd:02X} to test failed: TimeoutError")
         if cmd == p.CMD_READ_CUSTOMIZED:
             self._reads_since_write += 1
             if self.record["key"] and self._acted and self._reads_since_write > self.ack_after:
@@ -215,16 +227,20 @@ class FakeConsole(Hp2550Client):
         if cmd == p.CMD_READ_USR_PATH:
             return p._lstr("/path1?") + p._lstr(self.path2)
         if cmd == p.CMD_WRITE_CUSTOMIZED:
-            new = p.parse_custom(data)
-            self.writes.append(new["id"])
             if self.drop_writes:
+                self.writes.append(p.parse_custom(data)["id"])
                 self.drop_writes -= 1
                 return b""
-            self.record["id"] = new["id"]
-            self._acted = new["id"]
-            self._reads_since_write = 0
+            await self._apply(data)
             return b""
         raise AssertionError(cmd)
+
+    async def _apply(self, data):
+        new = p.parse_custom(data)
+        self.writes.append(new["id"])
+        self.record["id"] = new["id"]
+        self._acted = new["id"]
+        self._reads_since_write = 0
 
 
 V2_RECORD = {"id": "BL 5 #4", "key": "BP 0 BL 30 BS 0 #4", "host": "h",
@@ -263,11 +279,11 @@ async def test_send_command_resends_once_with_same_seq():
     assert c.writes == ["BS 1 #5", "BS 1 #5"]
 
 
-async def test_send_command_gives_up_after_one_resend():
+async def test_send_command_gives_up_after_max_writes():
     c = FakeConsole(V2_RECORD, drop_writes=5)
-    with pytest.raises(Hp2550Error):
-        await c.send_command("BS", 1, GEN_V2, timeout=0.02, poll=0.005)
-    assert len(c.writes) == 2
+    with pytest.raises(Hp2550Error, match="after 3 writes"):
+        await c.send_command("BS", 1, GEN_V2, timeout=1, poll=0.001)
+    assert c.writes == ["BS 1 #5"] * 3
     assert c.pending_seq is None
 
 
@@ -319,3 +335,172 @@ async def test_out_of_domain_value_never_reaches_the_wire():
     with pytest.raises(ValueError):
         await c.send_command("BL", 101, GEN_V2, timeout=1, poll=0.001)
     assert c.writes == []
+
+
+async def test_send_command_reads_the_record_once_before_writing():
+    c = FakeConsole(V2_RECORD)
+    await c.send_command("BP", 1, GEN_V2, timeout=1, poll=0.001)
+    assert c.exchanges[:2] == [p.CMD_READ_CUSTOMIZED, p.CMD_WRITE_CUSTOMIZED]
+
+
+# --- surviving a dropped exchange --------------------------------------------
+
+W, R = p.CMD_WRITE_CUSTOMIZED, p.CMD_READ_CUSTOMIZED
+
+
+async def test_lost_write_is_rewritten(caplog):
+    # The Nov 21 failure: the write's reply never came and the console didn't act.
+    c = FakeConsole(V2_RECORD, faults=[(W, False)])
+    status = await c.send_command("BP", 0, GEN_V2, timeout=1, poll=0.001)
+    assert status.seq == 5
+    assert c.writes == ["BP 0 #5"]  # the faulted write never took effect
+    assert c.exchanges.count(W) == 2
+    text = caplog.text
+    assert "write 1 of 3 failed" in text and "TimeoutError" in text
+    assert "it was lost" in text
+    assert "confirmed after 2 write(s); 1 failed exchange(s)" in text
+
+
+async def test_write_whose_reply_was_lost_is_not_rewritten(caplog):
+    c = FakeConsole(V2_RECORD, faults=[(W, True)])
+    status = await c.send_command("BP", 0, GEN_V2, timeout=1, poll=0.001)
+    assert status.seq == 5
+    assert c.exchanges.count(W) == 1
+    assert "it landed" in caplog.text
+
+
+async def test_failed_first_read_is_retried():
+    c = FakeConsole(V2_RECORD, faults=[(R, False)])
+    status = await c.send_command("BP", 1, GEN_V2, timeout=1, poll=0.001)
+    assert status.seq == 5 and c.writes == ["BP 1 #5"]
+
+
+async def test_failed_status_reads_are_tolerated():
+    # The first read succeeds (the head fault is a write); then the write and
+    # the next two status reads fail.
+    c = FakeConsole(V2_RECORD, faults=[(W, False), (R, False), (R, False)])
+    status = await c.send_command("BS", 1, GEN_V2, timeout=1, poll=0.001)
+    assert status.seq == 5
+
+
+async def test_reverted_slot_is_rewritten_with_the_same_seq():
+    c = FakeConsole(V2_RECORD, ack_after=3)
+    orig = c._transact
+    reverted = False
+
+    async def transact(cmd, data=b""):
+        nonlocal reverted
+        out = await orig(cmd, data)
+        if cmd == W and not reverted:
+            # A screen exit puts the old command back before the console acts.
+            reverted = True
+            c.record["id"] = V2_RECORD["id"]
+            c._acted = None
+        return out
+
+    c._transact = transact
+    status = await c.send_command("BS", 1, GEN_V2, timeout=1, poll=0.001)
+    assert c.writes == ["BS 1 #5", "BS 1 #5"]
+    assert status.seq == 5
+
+
+async def test_console_that_never_answers_still_raises():
+    faults = [(R, False)] * 1000
+    c = FakeConsole(V2_RECORD, faults=faults)
+    with pytest.raises(Hp2550Error, match="record never read") as err:
+        await c.send_command("BP", 0, GEN_V2, timeout=0.05, poll=0.001)
+    assert "TimeoutError" in str(err.value)
+    assert c.writes == [] and c.pending_seq is None
+
+
+async def test_every_write_lost_raises_with_each_attempt_named():
+    c = FakeConsole(V2_RECORD, faults=[(W, False)] * 3)
+    with pytest.raises(Hp2550Error) as err:
+        await c.send_command("BP", 0, GEN_V2, timeout=1, poll=0.001)
+    msg = str(err.value)
+    assert "after 3 writes" in msg
+    for n in (1, 2, 3):
+        assert f"write {n} of 3" in msg
+
+
+async def test_total_time_is_bounded_by_timeout():
+    import asyncio
+    import time
+
+    c = FakeConsole(V2_RECORD)
+    orig = c._transact
+
+    async def hang_on_write(cmd, data=b""):
+        if cmd == W:
+            await asyncio.sleep(10)  # an exchange that never finishes
+        return await orig(cmd, data)
+
+    c._transact = hang_on_write
+    t0 = time.monotonic()
+    with pytest.raises(Hp2550Error, match="within 0.1 s"):
+        await c.send_command("BP", 0, GEN_V2, timeout=0.1, poll=0.001)
+    assert time.monotonic() - t0 < 0.5
+    assert c.pending_seq is None
+
+
+# --- transport: error text and the checksum wait ----------------------------
+
+
+def test_describe_names_the_type():
+    assert p.describe(TimeoutError()) == "TimeoutError"
+    assert p.describe(OSError(101, "Network unreachable")) == (
+        "OSError: [Errno 101] Network unreachable")
+
+
+def _serve(monkeypatch, reply: bytes | None):
+    """Stand in for the console's socket: every connection receives `reply`.
+
+    The stream is left open after the reply (no EOF), as the ESP may do, so a
+    read for more bytes only ends on a timeout.
+    """
+    import asyncio
+
+    class Writer:
+        def write(self, data):
+            pass
+
+        async def drain(self):
+            pass
+
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            pass
+
+    async def open_connection(host, port):
+        reader = asyncio.StreamReader()
+        if reply is not None:
+            reader.feed_data(reply)
+        return reader, Writer()
+
+    monkeypatch.setattr(p.asyncio, "open_connection", open_connection)
+
+
+async def test_full_frame_does_not_wait_for_a_tail(monkeypatch):
+    import time
+
+    mac = bytes(range(6))
+    body = bytes([p.CMD_READ_MAC, 3 + len(mac)]) + mac
+    _serve(monkeypatch, b"\xff\xff" + body + bytes([sum(body) & 0xFF]))
+    t0 = time.monotonic()
+    assert await Hp2550Client("127.0.0.1").read_mac() == "00:01:02:03:04:05"
+    assert time.monotonic() - t0 < p.TAIL_TIMEOUT
+
+
+async def test_frame_without_checksum_still_parses(monkeypatch):
+    mac = bytes(range(6))
+    _serve(monkeypatch, b"\xff\xff" + bytes([p.CMD_READ_MAC, 9]) + mac)
+    assert await Hp2550Client("127.0.0.1").read_mac() == "00:01:02:03:04:05"
+
+
+async def test_read_timeout_names_the_type_and_command(monkeypatch):
+    monkeypatch.setattr(p, "TIMEOUT", 0.1)
+    _serve(monkeypatch, None)
+    with pytest.raises(Hp2550Error, match=r"0x2A to 127\.0\.0\.1 failed: TimeoutError"):
+        await Hp2550Client("127.0.0.1").read_custom()

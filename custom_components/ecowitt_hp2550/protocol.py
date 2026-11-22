@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
 import struct
-import time
 from dataclasses import dataclass
 from typing import Any
+
+_LOGGER = logging.getLogger(__name__)
 
 PORT = 45000
 
@@ -34,8 +36,12 @@ CMD_READ_USR_PATH = 0x51
 TIMEOUT = 5.0  # seconds, for the connect and for each read
 TAIL_TIMEOUT = 0.5  # the console sometimes omits the trailing checksum byte
 
-CONFIRM_TIMEOUT = 15.0  # seconds to wait for a command's seq echo, per attempt
+# A command has this long, end to end, to be written and echoed. The console
+# echoes within 6-12 s when nothing goes wrong, which leaves room for one lost
+# exchange (up to TIMEOUT) and a rewrite.
+COMMAND_TIMEOUT = 20.0
 CONFIRM_POLL = 2.0  # seconds between status reads while waiting
+MAX_WRITES = 3  # writes of one command before giving up on it
 
 STATUS_PATH_INDEX = 1  # v1: the status report lives in the second upload path
 
@@ -83,6 +89,16 @@ class Hp2550Status:
     auto: bool = False  # v2 only
     schedule: bool | None = None  # v2 only
     display_mode: bool | None = None  # v2 only, and only if the firmware reports DM
+
+
+def describe(err: BaseException) -> str:
+    """Name an exception's type as well as its text.
+
+    A read timeout's str() is empty, so the type is the only thing that tells
+    it apart from a reset or a short read in the log.
+    """
+    text = str(err)
+    return f"{type(err).__name__}: {text}" if text else type(err).__name__
 
 
 def _is_uint(text: str) -> bool:
@@ -295,6 +311,13 @@ def command_string(verb: str, value: int | str, seq: int, generation: int = GEN_
     return f"{verb} {value} #{seq}"
 
 
+def _summary(failures: list[str]) -> str:
+    """A suffix listing failed exchanges, or nothing if there were none."""
+    if not failures:
+        return ""
+    return f"; {len(failures)} failed exchange(s): " + "; ".join(failures)
+
+
 def redactable_id(text: str) -> bool:
     """True if a Station ID doesn't look like a mailbox command (may be a credential)."""
     return not _V2_COMMAND_RE.match(text or "")
@@ -321,26 +344,27 @@ class Hp2550Client:
                 reader, writer = await asyncio.wait_for(
                     asyncio.open_connection(self._host, PORT), TIMEOUT)
             except (TimeoutError, OSError) as err:
-                raise Hp2550Error(f"connect to {self._host}:{PORT} failed: {err}") from err
+                raise Hp2550Error(
+                    f"connect to {self._host}:{PORT} failed: {describe(err)}") from err
             try:
                 writer.write(pkt)
                 await writer.drain()
                 buf = b""
-                # A full frame is resp[3] + 2 bytes. Keep reading until we have
-                # that much; then wait briefly for the optional checksum byte.
+                # A full frame is resp[3] + 2 bytes including the checksum.
+                # Read until all but the checksum is here; then, only if the
+                # checksum didn't come with it, wait briefly for it (the
+                # console sometimes leaves it off).
                 while len(buf) < 4 or len(buf) < buf[3] + 1:
                     chunk = await asyncio.wait_for(reader.read(256), TIMEOUT)
                     if not chunk:
                         break
                     buf += chunk
-                with contextlib.suppress(asyncio.TimeoutError):
-                    while True:
-                        chunk = await asyncio.wait_for(reader.read(256), TAIL_TIMEOUT)
-                        if not chunk:
-                            break
-                        buf += chunk
+                if len(buf) >= 4 and len(buf) == buf[3] + 1:
+                    with contextlib.suppress(TimeoutError):
+                        buf += await asyncio.wait_for(reader.read(256), TAIL_TIMEOUT)
             except (TimeoutError, OSError) as err:
-                raise Hp2550Error(f"read from {self._host} failed: {err}") from err
+                raise Hp2550Error(
+                    f"0x{cmd:02X} to {self._host} failed: {describe(err)}") from err
             finally:
                 writer.close()
                 with contextlib.suppress(OSError, asyncio.TimeoutError):
@@ -365,17 +389,19 @@ class Hp2550Client:
 
         Returns None if neither is present (the console hasn't published one).
         """
+        return (await self._read_state())[1]
+
+    async def _read_state(self) -> tuple[dict[str, Any], Hp2550Status | None]:
+        """Read the custom record and the status it (or path2, on v1) carries."""
         record = await self.read_custom()
         status = parse_status_v2(record["key"])
-        if status is not None:
-            return status
-        return parse_status_v1((await self.read_paths())[STATUS_PATH_INDEX])
+        if status is None:
+            status = parse_status_v1((await self.read_paths())[STATUS_PATH_INDEX])
+        return record, status
 
-    async def _write_command(self, command: str) -> None:
-        """Write a command string into the Station ID, keeping other fields."""
-        record = await self.read_custom()
-        record["id"] = command
-        await self._transact(CMD_WRITE_CUSTOMIZED, build_custom(record))
+    async def _write_command(self, record: dict[str, Any], command: str) -> None:
+        """Write a command string into the Station ID of a freshly read record."""
+        await self._transact(CMD_WRITE_CUSTOMIZED, build_custom(dict(record, id=command)))
 
     async def send_command(
         self,
@@ -383,52 +409,110 @@ class Hp2550Client:
         value: int | str,
         generation: int,
         *,
-        timeout: float = CONFIRM_TIMEOUT,
+        timeout: float = COMMAND_TIMEOUT,
         poll: float = CONFIRM_POLL,
+        max_writes: int = MAX_WRITES,
     ) -> Hp2550Status:
         """Send one command and wait for the console to echo its seq.
 
-        Commands are serialized: the next one isn't written until this one's
-        seq shows up in the status, because a second write inside a poll cycle
-        can be overwritten. If no echo arrives within `timeout`, the command is
-        rewritten once with the same seq (the stock screens can drop it, and
-        a same-seq resend is a no-op if the first one was acted on after all).
-        Raises Hp2550Error if it still isn't confirmed. Returns the status that
-        carried the echo. Note that the echo confirms the console saw the
-        command, not that it acted on it: check the state fields.
+        Every `poll` seconds this reads the record, which carries both the
+        command slot and (on v2) the status, and acts on what it finds:
+
+        - the status echoes our seq: done (or Hp2550Rejected for !<seq>);
+        - the slot doesn't hold our command: (re)write it. That covers a write
+          that was lost on the way, and a slot reverted by the console (leaving
+          the Customized screen, or a status push carrying an older slot).
+          A rewrite uses the same seq, which the console ignores if it has
+          already acted on it;
+        - the slot holds our command: the console hasn't picked it up yet, so
+          keep waiting.
+
+        A failed exchange (a dropped reply, a refused connection) is logged
+        and the loop carries on, so one lost exchange doesn't lose the command.
+        Commands are serialized: the next isn't written until this one is
+        echoed, because a second write inside a poll cycle can be overwritten.
+
+        Raises Hp2550Error if the command isn't echoed within `timeout` seconds
+        in total (the whole call, including the first read), or after
+        `max_writes` writes. Returns the status that carried the echo. The echo
+        confirms the console saw the command; check the state fields for its
+        effect.
         """
         async with self._cmd_lock:
-            record = await self.read_custom()
-            known = parse_status_v2(record["key"])
-            seq = next_seq(record["id"], known.seq if known else None)
-            command = command_string(verb, value, seq, generation)
-            self.pending_seq = seq
+            command: str | None = None
+            writes = 0
+            failures: list[str] = []  # one entry per failed exchange
+            failed_write: int | None = None  # index in failures, until a read shows its fate
+
+            def note(step: str, err: Hp2550Error) -> None:
+                failures.append(f"{step}: {err}")
+                _LOGGER.warning("%s: %s failed: %s", command or f"{verb} {value}", step, err)
+
             try:
-                for _ in range(2):
-                    await self._write_command(command)
-                    status = await self._wait_for_echo(seq, timeout, poll)
-                    if status is not None and status.rejected:
-                        # Refused, nothing changed; resending can't help.
-                        raise Hp2550Rejected(command, status)
-                    if status is not None:
-                        return status
-                raise Hp2550Error(f"no confirmation of '{command}' after 2 attempts")
+                async with asyncio.timeout(timeout):
+                    state = None
+                    while state is None:
+                        try:
+                            state = await self._read_state()
+                        except Hp2550Error as err:
+                            note("first record read", err)
+                            await asyncio.sleep(poll)
+                    record, known = state
+                    avoid = known.seq if known and known.generation == GEN_V2 else None
+                    seq = next_seq(record["id"], avoid)
+                    command = command_string(verb, value, seq, generation)
+                    self.pending_seq = seq
+                    while True:
+                        if state is not None:
+                            record, status = state
+                            if failed_write is not None:
+                                # Did the failed write reach the console anyway?
+                                fate = "it landed" if record["id"] == command else "it was lost"
+                                failures[failed_write] += f", {fate}"
+                                _LOGGER.warning("%s: after the failed write %d, %s",
+                                                command, writes, fate)
+                                failed_write = None
+                            if status is not None and status.seq == seq:
+                                if status.rejected:
+                                    # Refused, nothing changed; resending can't help.
+                                    raise Hp2550Rejected(command, status)
+                                if failures or writes > 1:
+                                    _LOGGER.warning("%s: confirmed after %d write(s)%s",
+                                                    command, writes, _summary(failures))
+                                return status
+                            if record["id"] != command:
+                                if writes >= max_writes:
+                                    raise Hp2550Error(
+                                        f"no confirmation of '{command}' after {writes} writes"
+                                        + _summary(failures))
+                                writes += 1
+                                if writes > 1:
+                                    # Don't log a slot that may be a credential.
+                                    held = ("(not a command)" if redactable_id(record["id"])
+                                            else f"'{record['id']}'")
+                                    _LOGGER.warning("%s: command slot holds %s, rewriting "
+                                                    "(write %d of %d)", command, held,
+                                                    writes, max_writes)
+                                try:
+                                    await self._write_command(record, command)
+                                except Hp2550Error as err:
+                                    note(f"write {writes} of {max_writes}", err)
+                                    failed_write = len(failures) - 1
+                        await asyncio.sleep(poll)
+                        try:
+                            state = await self._read_state()
+                        except Hp2550Error as err:
+                            note("status read", err)
+                            state = None
+            except TimeoutError as err:
+                if failed_write is not None:
+                    failures[failed_write] += ", fate unknown"
+                what = f"'{command}'" if command else f"{verb} {value} (record never read)"
+                raise Hp2550Error(
+                    f"no confirmation of {what} within {timeout:g} s, {writes} write(s)"
+                    + _summary(failures)) from err
             finally:
                 self.pending_seq = None
-
-    async def _wait_for_echo(
-        self, seq: int, timeout: float, poll: float
-    ) -> Hp2550Status | None:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            await asyncio.sleep(poll)
-            try:
-                status = await self.read_status()
-            except Hp2550Error:
-                continue  # a transient read failure; keep waiting
-            if status is not None and status.seq == seq:
-                return status  # applied (#seq) or rejected (!seq): caller checks
-        return None
 
     async def read_raw(self) -> dict[str, Any]:
         """Return the raw custom record and upload paths, for diagnostics."""
